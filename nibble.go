@@ -45,13 +45,35 @@ func byteToNibbles(data byte) []Nibble {
 	}
 }
 
-// nibblesToBytes converts a series of Nibbles into a byte slice representing the original bytes.
-// This function assumes the input length is even
+// nibblesToBytes packs a series of Nibbles into a byte slice, two nibbles per
+// byte (high nibble first). This is the inverse of bytesToNibbles and is valid
+// for an even number of nibbles (e.g. a full hash path). A trailing odd nibble
+// is packed into the low half of a final byte (zero high half) instead of
+// indexing out of bounds and panicking.
 func nibblesToBytes(data []Nibble) []byte {
-	ret := make([]byte, 0, len(data)/2)
-	for i := 0; i < len(data); i += 2 {
+	ret := make([]byte, 0, (len(data)+1)/2)
+	i := 0
+	for ; i+1 < len(data); i += 2 {
 		tmpByte := byte(data[i]<<4) + byte(data[i+1])
 		ret = append(ret, tmpByte)
+	}
+	if i < len(data) {
+		// Odd trailing nibble: place it in the low half of a final byte.
+		ret = append(ret, byte(data[i]))
+	}
+	return ret
+}
+
+// nibblesToExpandedBytes encodes a series of Nibbles as a byte slice with one
+// nibble per byte (the low half of each byte). This matches the on-chain Aiken
+// merkle-patricia-forestry encoding of a Fork neighbour's prefix, where the
+// prefix is consumed nibble-by-nibble (see helpers.nibbles and do_fork's
+// combine(neighbor.prefix, neighbor.root)) and the reference TS library's
+// nibbles(prefix) buffer. Works for any length, including odd.
+func nibblesToExpandedBytes(data []Nibble) []byte {
+	ret := make([]byte, len(data))
+	for i, n := range data {
+		ret[i] = byte(n)
 	}
 	return ret
 }

@@ -151,7 +151,10 @@ func (s *ProofStep) MarshalCBOR() ([]byte, error) {
 		return cbor.Encode(tmpData)
 
 	case ProofStepTypeFork:
-		prefixBytes := nibblesToBytes(s.neighbor.prefix)
+		// The Fork neighbour prefix is consumed nibble-by-nibble on-chain
+		// (combine(neighbor.prefix, neighbor.root) in the Aiken validator),
+		// so it must be encoded one nibble per byte rather than packed.
+		prefixBytes := nibblesToExpandedBytes(s.neighbor.prefix)
 		tmpData := cbor.NewConstructorEncoder(
 			1,
 			cbor.IndefLengthList{
