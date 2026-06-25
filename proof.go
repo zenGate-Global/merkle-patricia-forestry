@@ -118,7 +118,7 @@ func (p *Proof) Rewind(targetIdx int, prefixLen int, neighbors []Node) {
 func (p *Proof) MarshalCBOR() ([]byte, error) {
 	tmpSteps := make([]any, 0, len(p.steps))
 	for _, step := range p.steps {
-		tmpSteps = append(tmpSteps, step)
+		tmpSteps = append(tmpSteps, &step)
 	}
 	tmpData := cbor.IndefLengthList(tmpSteps)
 	return cbor.Encode(&tmpData)
@@ -134,11 +134,11 @@ type ProofStep struct {
 func (s *ProofStep) MarshalCBOR() ([]byte, error) {
 	switch s.stepType {
 	case ProofStepTypeBranch:
-		tmpNeighbors := []byte{}
+		tmpNeighbors := make([]byte, 0, len(s.neighbors)*HashSize)
 		for _, neighbor := range s.neighbors {
 			tmpNeighbors = append(tmpNeighbors, neighbor.Bytes()...)
 		}
-		tmpData := cbor.NewConstructor(
+		tmpData := cbor.NewConstructorEncoder(
 			0,
 			cbor.IndefLengthList{
 				s.prefixLength,
@@ -148,27 +148,31 @@ func (s *ProofStep) MarshalCBOR() ([]byte, error) {
 				},
 			},
 		)
-		return cbor.Encode(&tmpData)
+		return cbor.Encode(tmpData)
 
 	case ProofStepTypeFork:
-		tmpData := cbor.NewConstructor(
+		// The Fork neighbour prefix is consumed nibble-by-nibble on-chain
+		// (combine(neighbor.prefix, neighbor.root) in the Aiken validator),
+		// so it must be encoded one nibble per byte rather than packed.
+		prefixBytes := nibblesToExpandedBytes(s.neighbor.prefix)
+		tmpData := cbor.NewConstructorEncoder(
 			1,
 			cbor.IndefLengthList{
 				s.prefixLength,
-				cbor.NewConstructor(
+				cbor.NewConstructorEncoder(
 					0,
 					cbor.IndefLengthList{
 						int(s.neighbor.nibble),
-						s.neighbor.prefix,
+						prefixBytes,
 						s.neighbor.root,
 					},
 				),
 			},
 		)
-		return cbor.Encode(&tmpData)
+		return cbor.Encode(tmpData)
 
 	case ProofStepTypeLeaf:
-		tmpData := cbor.NewConstructor(
+		tmpData := cbor.NewConstructorEncoder(
 			2,
 			cbor.IndefLengthList{
 				s.prefixLength,
@@ -176,7 +180,7 @@ func (s *ProofStep) MarshalCBOR() ([]byte, error) {
 				s.neighbor.value,
 			},
 		)
-		return cbor.Encode(&tmpData)
+		return cbor.Encode(tmpData)
 
 	default:
 		return nil, errors.New("unknown proof step type")

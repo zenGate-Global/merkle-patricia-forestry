@@ -16,6 +16,7 @@ package mpf
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -84,8 +85,9 @@ func (t *Trie) Set(key []byte, val []byte) {
 			n.Set(val)
 			return
 		}
+		tmpPrefix := commonPrefix(path, n.suffix)
 		// Create new branch
-		tmpBranch := newBranch(nil)
+		tmpBranch := newBranch(tmpPrefix)
 		// Insert original value
 		tmpBranch.insert(n.suffix, n.key, n.value)
 		// Insert new value
@@ -93,7 +95,32 @@ func (t *Trie) Set(key []byte, val []byte) {
 		// Replace root node
 		t.rootNode = tmpBranch
 	case *Branch:
-		n.insert(path, key, val)
+		// Determine the common prefix nibbles between existing branch and new leaf node
+		tmpPrefix := commonPrefix(path, n.prefix)
+		// Check for common prefix matching branch prefix
+		if string(tmpPrefix) == string(n.prefix) {
+			// Insert new value in existing branch
+			n.insert(
+				path,
+				key,
+				val,
+			)
+			return
+		}
+		// Create a new branch node with the common prefix
+		tmpBranch := newBranch(tmpPrefix)
+		// Adjust existing branch prefix and add to new branch
+		newOrigBranchPrefix := n.prefix[len(tmpPrefix):]
+		n.prefix = newOrigBranchPrefix[1:]
+		n.updateHash()
+		tmpBranch.addChild(int(newOrigBranchPrefix[0]), n)
+		// Insert new value in new branch
+		tmpBranch.insert(
+			path,
+			key,
+			val,
+		)
+		t.rootNode = tmpBranch
 	default:
 		panic("unknown node type...this should never happen")
 	}
@@ -117,17 +144,35 @@ func (t *Trie) Delete(key []byte) error {
 		if err := n.delete(path); err != nil {
 			return err
 		}
-		// Move single remaining child node to root node
+		// collapse root if it now has a single child:
+		// splice the vanished branch's prefix and the child slot nibble into that child.
 		if n.size == 1 {
-			tmpChildren := n.getChildren()
-			tmpChild := tmpChildren[0].(*Leaf)
-			childPath := keyToPath(tmpChild.key)
-			newNode := newLeaf(
-				childPath,
-				tmpChild.key,
-				tmpChild.value,
+			var (
+				onlyIdx   int
+				onlyChild Node
 			)
-			t.rootNode = newNode
+			for i, c := range n.children {
+				if c != nil {
+					onlyIdx, onlyChild = i, c
+					break
+				}
+			}
+			switch c := onlyChild.(type) {
+			case *Leaf:
+				// new suffix = n.prefix ++ [onlyIdx] ++ c.suffix
+				newSuffix := slices.Concat(n.prefix, []Nibble{Nibble(onlyIdx)}, c.suffix)
+				c.suffix = newSuffix
+				c.updateHash()
+				t.rootNode = c
+			case *Branch:
+				// new prefix = n.prefix ++ [onlyIdx] ++ c.prefix
+				newPrefix := slices.Concat(n.prefix, []Nibble{Nibble(onlyIdx)}, c.prefix)
+				c.prefix = newPrefix
+				c.updateHash()
+				t.rootNode = c
+			default:
+				panic("unknown node type...this should never happen")
+			}
 		}
 	default:
 		panic("unknown node type...this should never happen")
@@ -169,4 +214,90 @@ func (t *Trie) Prove(key []byte) (*Proof, error) {
 	}
 	path := keyToPath(key)
 	return t.rootNode.generateProof(path)
+}
+
+// ProveInsert returns the proof required to insert or update the specified key
+// against the trie's current root.
+func (t *Trie) ProveInsert(key []byte) (*Proof, error) {
+	if t.rootNode == nil {
+		return &Proof{}, nil
+	}
+	path := keyToPath(key)
+	return generateInsertProof(t.rootNode, path)
+}
+
+func generateInsertProof(node Node, path []Nibble) (*Proof, error) {
+	switch n := node.(type) {
+	case *Leaf:
+		if string(path) == string(n.suffix) {
+			return n.generateProof(path)
+		}
+
+		prefix := commonPrefix(path, n.suffix)
+		pathMinusPrefix := path[len(prefix):]
+		leafSuffixMinusPrefix := n.suffix[len(prefix):]
+		if len(pathMinusPrefix) == 0 || len(leafSuffixMinusPrefix) == 0 {
+			return nil, ErrKeyNotExist
+		}
+
+		childIdx := int(pathMinusPrefix[0])
+		leafChildIdx := int(leafSuffixMinusPrefix[0])
+		leafCopy := newLeaf(leafSuffixMinusPrefix[1:], n.key, n.value)
+
+		var children [16]Node
+		children[leafChildIdx] = leafCopy
+
+		proof := newProof(path, nil)
+		proof.Rewind(childIdx, len(prefix), children[:])
+		return proof, nil
+
+	case *Branch:
+		prefix := commonPrefix(path, n.prefix)
+		if string(prefix) != string(n.prefix) {
+			pathMinusPrefix := path[len(prefix):]
+			branchPrefixMinusPrefix := n.prefix[len(prefix):]
+			if len(pathMinusPrefix) == 0 || len(branchPrefixMinusPrefix) == 0 {
+				return nil, ErrKeyNotExist
+			}
+
+			childIdx := int(pathMinusPrefix[0])
+			branchChildIdx := int(branchPrefixMinusPrefix[0])
+			branchCopy := &Branch{
+				prefix:   append([]Nibble(nil), branchPrefixMinusPrefix[1:]...),
+				children: n.children,
+				size:     n.size,
+			}
+			branchCopy.updateHash()
+
+			var children [16]Node
+			children[branchChildIdx] = branchCopy
+
+			proof := newProof(path, nil)
+			proof.Rewind(childIdx, len(prefix), children[:])
+			return proof, nil
+		}
+
+		pathMinusPrefix := path[len(n.prefix):]
+		if len(pathMinusPrefix) == 0 {
+			return nil, ErrKeyNotExist
+		}
+		childIdx := int(pathMinusPrefix[0])
+		subPath := pathMinusPrefix[1:]
+
+		if n.children[childIdx] == nil {
+			proof := newProof(path, nil)
+			proof.Rewind(childIdx, len(n.prefix), n.children[:])
+			return proof, nil
+		}
+
+		proof, err := generateInsertProof(n.children[childIdx], subPath)
+		if err != nil {
+			return nil, err
+		}
+		proof.Rewind(childIdx, len(n.prefix), n.children[:])
+		return proof, nil
+
+	default:
+		panic("unknown node type...this should never happen")
+	}
 }
